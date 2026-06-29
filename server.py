@@ -10,13 +10,14 @@ import asyncio
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware  # ✨ CORS 방어용 추가
 from pydantic import Field, ConfigDict
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 from mcp.server.sse import SseServerTransport
 from collections import Counter
 
-# 🚨 [핵심 방어] 공식 MCP SDK가 카카오 전용 필드(annotations)를 삭제하지 못하도록 강제 허용
+# [핵심 방어] 공식 MCP SDK가 카카오 전용 필드(annotations)를 삭제하지 못하도록 강제 허용
 Tool.model_config = ConfigDict(extra="allow")
 
 # PlayMCP 규정에 맞춘 필수 필드 (annotations 포함)
@@ -43,7 +44,6 @@ except Exception as e:
 # ==========================================
 @server.list_tools()
 async def handle_list_tools() -> list[Tool]:
-    # [활성화] Base64 최적화 이미지 분석 툴
     # PlayMCP 규정에 따라 영문 작성 권장 및 서비스명(영/한) 병기, annotations 속성 5가지 필수 포함
     tool_base64 = PlayMCPTool(
         name="analyze_vision_base64_optimized",
@@ -71,7 +71,6 @@ def process_core_logic(img_cv2: np.ndarray) -> str:
     if detector is None:
         return "⚠️ **오류**: AI 시각 모델이 로드되지 않았습니다."
 
-    # Edge에서 압축을 안 하고 보냈을 경우를 대비한 서버측 최후 방어선 (640px)
     max_dim = 640
     h, w = img_cv2.shape[:2]
     if max(h, w) > max_dim:
@@ -100,7 +99,6 @@ def process_core_logic(img_cv2: np.ndarray) -> str:
         box_area = bbox.width * bbox.height
         center_x = bbox.origin_x + (bbox.width / 2)
 
-        # 10시 ~ 2시 방향 계산
         pos_ratio = center_x / img_width
         if pos_ratio < 0.2: direction = "10시 방향 (좌측 끝)"
         elif pos_ratio < 0.4: direction = "11시 방향 (좌측)"
@@ -110,7 +108,6 @@ def process_core_logic(img_cv2: np.ndarray) -> str:
         
         directional_guidance.append(f"- **{obj_name}**: {direction}")
 
-        # 면적 50% 이상 시 충돌 경고
         area_ratio = box_area / total_image_area
         if area_ratio >= 0.5:
             if pos_ratio < 0.4: safe_action = "오른쪽(1~2시 방향)으로 피하시거나"
@@ -121,9 +118,7 @@ def process_core_logic(img_cv2: np.ndarray) -> str:
     counts = Counter(detected_names)
     counts_str = ", ".join([f"{item} {count}개" for item, count in counts.items()])
 
-    # PlayMCP 권장사항: Markdown 포맷으로 정제된 응답 작성
     result_text = f"### 👁️ VisionHelper(비전헬퍼) 시각보조 분석 보고서\n\n"
-    
     if collision_warnings:
         result_text += f"#### 🚨 긴급 충돌 경고\n" + "\n".join(collision_warnings) + "\n\n"
     else:
@@ -135,7 +130,7 @@ def process_core_logic(img_cv2: np.ndarray) -> str:
     return result_text
 
 # ==========================================
-# 4. 데이터 소스별 전처리 분기 로직
+# 4. 데이터 소스 처리 로직
 # ==========================================
 def process_base64_sync(image_base64: str) -> str:
     try:
@@ -149,7 +144,7 @@ def process_base64_sync(image_base64: str) -> str:
         return f"⚠️ Base64 이미지 분석 실패: {str(e)}"
 
 # ==========================================
-# 5. MCP 툴 라우터 (비동기 처리)
+# 5. MCP 툴 라우터
 # ==========================================
 @server.call_tool()
 async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
@@ -159,41 +154,47 @@ async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
         base64_str = arguments.get("image_base64", "")
         if not base64_str: return [TextContent(type="text", text="⚠️ 오류: Base64가 입력되지 않았습니다.")]
         result_text = await asyncio.to_thread(process_base64_sync, base64_str)
-
     else:
         raise ValueError(f"Unknown tool: {name}")
 
-    end_time = time.perf_counter()
-    latency_ms = (end_time - start_time) * 1000
-    print(f"⏱️ [{name}] 처리 시간: {latency_ms:.2f} ms")
-
-    # 서버 운영 가이드 모니터링: p99 3000ms 초과 방지 체크
+    latency_ms = (time.perf_counter() - start_time) * 1000
     if latency_ms > 3000:
-        print("🚨 [WARNING] p99 3000ms 초과 발생! (PlayMCP 권장 응답 속도 위반 위험)")
+        print("🚨 [WARNING] p99 3000ms 초과 발생!")
     
     return [TextContent(type="text", text=result_text)]
 
 # ==========================================
-# 6. FastAPI 및 SSE 설정 (프록시 경로 충돌 완벽 방어)
+# 6. FastAPI 및 라우팅 설정 (완벽 방어 적용)
 # ==========================================
 app = FastAPI()
+
+# ✨ PlayMCP 대시보드에서 툴 목록을 읽어갈 수 있도록 CORS 완벽 허용
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 sse = SseServerTransport("/mcp")
 
-# Kakaocloud 게이트웨이가 경로를 자르거나(/) 그대로 두거나(/mcp) 모두 처리하도록 다중 매핑
-@app.get("/")
-@app.get("/mcp")
-async def handle_sse(request: Request):
+# 상태 체크용 기본 루트
+@app.get("/health")
+def health_check():
+    return {"status": "Active"}
+
+# ✨ 모든 종류의 GET 요청 흡수 (경로 잘림, 변형 방어)
+@app.get("/{path:path}")
+async def handle_sse(path: str, request: Request):
     async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
         await server.run(streams[0], streams[1], server.create_initialization_options())
 
-# POST 통신 시 발생하는 상대경로/절대경로 꼬임 현상을 모두 방어
-@app.post("/")
-@app.post("/mcp")
-@app.post("/mcp/mcp")
-async def handle_post(request: Request):
+# ✨ 모든 종류의 POST 요청 흡수 (메시지 통신 경로 꼬임 방어)
+@app.post("/{path:path}")
+async def handle_post(path: str, request: Request):
     await sse.handle_post_message(request.scope, request.receive, request._send)
 
 if __name__ == "__main__":
-    # 자동 빌드 환경(PlayMCP)에서 주입하는 PORT 환경변수를 우선적으로 사용 (기본값 8080)
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)
