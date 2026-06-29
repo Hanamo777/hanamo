@@ -260,5 +260,10 @@ async def handle_sse(request: Request):
 async def handle_post(request: Request):
     await sse.handle_post_message(request.scope, request.receive, request._send)
 
+# if __name__ == "__main__":
+#     uvicorn.run(app, host="0.0.0.0", port=3000)
+
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=3000)
+    # 자동 빌드 환경(PlayMCP)에서 주입하는 PORT 환경변수를 우선적으로 사용 (기본값 8080)
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)
