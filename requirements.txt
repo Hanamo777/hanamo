@@ -1,0 +1,12 @@
+# --- MCP 및 통신 관련 ---
+mcp
+fastapi
+uvicorn
+starlette
+pydantic
+requests       # 추가됨: URL에서 이미지 다운로드를 위한 라이브러리
+
+# --- AI 비전 및 이미지 처리 ---
+mediapipe
+opencv-python-headless
+numpy

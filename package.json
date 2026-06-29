@@ -1,0 +1,11 @@
+{
+  "name": "mcp-calculator",
+  "version": "1.0.0",
+  "description": "PlayMCP 테스트용 덧셈 계산기",
+  "type": "module",
+  "main": "server.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.1",
+    "express": "^4.21.2"
+  }
+}
