@@ -10,11 +10,14 @@ import asyncio
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from fastapi import FastAPI, Request
-from pydantic import Field
+from pydantic import Field, ConfigDict
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 from mcp.server.sse import SseServerTransport
 from collections import Counter
+
+# 🚨 [핵심 방어] 공식 MCP SDK가 카카오 전용 필드(annotations)를 삭제하지 못하도록 강제 허용
+Tool.model_config = ConfigDict(extra="allow")
 
 # PlayMCP 규정에 맞춘 필수 필드 (annotations 포함)
 class PlayMCPTool(Tool):
@@ -40,44 +43,6 @@ except Exception as e:
 # ==========================================
 @server.list_tools()
 async def handle_list_tools() -> list[Tool]:
-    """
-    # [주석 처리됨] URL 기반 이미지 분석 툴
-    tool_url = PlayMCPTool(
-        name="analyze_vision_from_url",
-        description="Analyzes an image from a publicly accessible URL to detect objects. Provided by VisionHelper(비전헬퍼).",
-        inputSchema={
-            "type": "object",
-            "properties": {"image_url": {"type": "string", "description": "Publicly accessible image URL"}},
-            "required": ["image_url"]
-        },
-        annotations={
-            "title": "URL Image Vision Analysis",
-            "readOnlyHint": "true",
-            "destructiveHint": "false",
-            "openWorldHint": "false",
-            "idempotentHint": "true"
-        }
-    )
-    
-    # [주석 처리됨] 로컬 경로 기반 이미지 분석 툴
-    tool_path = PlayMCPTool(
-        name="analyze_vision_from_path",
-        description="Analyzes an image from an absolute local file path for high-speed local processing. Provided by VisionHelper(비전헬퍼).",
-        inputSchema={
-            "type": "object",
-            "properties": {"file_path": {"type": "string", "description": "Absolute local file path"}},
-            "required": ["file_path"]
-        },
-        annotations={
-            "title": "Local Path Vision Analysis",
-            "readOnlyHint": "true",
-            "destructiveHint": "false",
-            "openWorldHint": "false",
-            "idempotentHint": "true"
-        }
-    )
-    """
-
     # [활성화] Base64 최적화 이미지 분석 툴
     # PlayMCP 규정에 따라 영문 작성 권장 및 서비스명(영/한) 병기, annotations 속성 5가지 필수 포함
     tool_base64 = PlayMCPTool(
@@ -97,11 +62,10 @@ async def handle_list_tools() -> list[Tool]:
         }
     )
     
-    # URL, Path 툴은 제외하고 Base64 툴 1개만 리턴
     return [tool_base64]
 
 # ==========================================
-# 3. 핵심 AI 분석 로직 (순수 함수 - DRY 패턴 적용)
+# 3. 핵심 AI 분석 로직 (순수 함수)
 # ==========================================
 def process_core_logic(img_cv2: np.ndarray) -> str:
     if detector is None:
@@ -173,29 +137,6 @@ def process_core_logic(img_cv2: np.ndarray) -> str:
 # ==========================================
 # 4. 데이터 소스별 전처리 분기 로직
 # ==========================================
-"""
-# [주석 처리됨] URL 및 Path 처리 함수 비활성화
-def process_url_sync(image_url: str) -> str:
-    try:
-        response = requests.get(image_url, timeout=5)
-        response.raise_for_status()
-        nparr = np.frombuffer(response.content, np.uint8)
-        img_cv2 = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if img_cv2 is None: return "⚠️ 오류: URL에서 이미지를 디코딩할 수 없습니다."
-        return process_core_logic(img_cv2)
-    except Exception as e:
-        return f"⚠️ URL 이미지 다운로드/분석 실패: {str(e)}"
-
-def process_path_sync(file_path: str) -> str:
-    try:
-        if not os.path.exists(file_path): return f"⚠️ 오류: 파일을 찾을 수 없습니다. ({file_path})"
-        img_cv2 = cv2.imread(file_path, cv2.IMREAD_COLOR)
-        if img_cv2 is None: return "⚠️ 오류: 손상되었거나 읽을 수 없는 이미지입니다."
-        return process_core_logic(img_cv2)
-    except Exception as e:
-        return f"⚠️ 로컬 파일 분석 실패: {str(e)}"
-"""
-
 def process_base64_sync(image_base64: str) -> str:
     try:
         if "," in image_base64: image_base64 = image_base64.split(",")[1]
@@ -213,19 +154,6 @@ def process_base64_sync(image_base64: str) -> str:
 @server.call_tool()
 async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
     start_time = time.perf_counter()
-
-    # [주석 처리됨] 라우터 분기 비활성화
-    """
-    if name == "analyze_vision_from_url":
-        url = arguments.get("image_url", "")
-        if not url: return [TextContent(type="text", text="⚠️ 오류: URL이 입력되지 않았습니다.")]
-        result_text = await asyncio.to_thread(process_url_sync, url)
-
-    elif name == "analyze_vision_from_path":
-        path = arguments.get("file_path", "")
-        if not path: return [TextContent(type="text", text="⚠️ 오류: 경로가 입력되지 않았습니다.")]
-        result_text = await asyncio.to_thread(process_path_sync, path)
-    """
 
     if name == "analyze_vision_base64_optimized":
         base64_str = arguments.get("image_base64", "")
@@ -246,22 +174,24 @@ async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
     return [TextContent(type="text", text=result_text)]
 
 # ==========================================
-# 6. FastAPI 및 SSE 설정
+# 6. FastAPI 및 SSE 설정 (프록시 경로 충돌 완벽 방어)
 # ==========================================
 app = FastAPI()
 sse = SseServerTransport("/mcp")
 
+# Kakaocloud 게이트웨이가 경로를 자르거나(/) 그대로 두거나(/mcp) 모두 처리하도록 다중 매핑
+@app.get("/")
 @app.get("/mcp")
 async def handle_sse(request: Request):
     async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
         await server.run(streams[0], streams[1], server.create_initialization_options())
 
+# POST 통신 시 발생하는 상대경로/절대경로 꼬임 현상을 모두 방어
+@app.post("/")
 @app.post("/mcp")
+@app.post("/mcp/mcp")
 async def handle_post(request: Request):
     await sse.handle_post_message(request.scope, request.receive, request._send)
-
-# if __name__ == "__main__":
-#     uvicorn.run(app, host="0.0.0.0", port=3000)
 
 if __name__ == "__main__":
     # 자동 빌드 환경(PlayMCP)에서 주입하는 PORT 환경변수를 우선적으로 사용 (기본값 8080)
