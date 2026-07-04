@@ -202,7 +202,6 @@ async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
 # ==========================================
 app = FastAPI()
 
-# ✨ PlayMCP 대시보드에서 툴 목록을 읽어갈 수 있도록 CORS 완벽 허용
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -213,25 +212,32 @@ app.add_middleware(
 
 sse = SseServerTransport("/mcp")
 
-# 상태 체크용 기본 루트
 @app.get("/health")
 def health_check():
     return {"status": "Active"}
 
-# 🚨 기존에 있던 @app.get("/{path:path}") 와 @app.post("/{path:path}") 부분은 완전히 지워주세요.
+# ✨ [핵심 방어] FastAPI의 'NoneType' 에러를 막기 위한 빈(Empty) ASGI 함수
+async def empty_asgi_app(scope, receive, send):
+    pass
 
-# ✨ FastAPI가 응답을 생성하지 못하도록 순수 비동기 함수로만 정의합니다.
 async def handle_sse(request: Request):
     async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
         await server.run(streams[0], streams[1], server.create_initialization_options())
+    # ✨ 에러 방지용 더미 앱 반환
+    return empty_asgi_app
 
 async def handle_post(request: Request):
     await sse.handle_post_message(request.scope, request.receive, request._send)
+    # ✨ 에러 방지용 더미 앱 반환
+    return empty_asgi_app
 
-# ✨ Starlette Route를 사용하여 "/mcp" 경로에 직접 연결합니다.
+# 프록시 경로 잘림 대비 (/mcp 및 / 모두 허용)
 app.routes.append(Route("/mcp", endpoint=handle_sse, methods=["GET"]))
 app.routes.append(Route("/mcp", endpoint=handle_post, methods=["POST"]))
+app.routes.append(Route("/", endpoint=handle_sse, methods=["GET"]))
+app.routes.append(Route("/", endpoint=handle_post, methods=["POST"]))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # 클라우드 환경 접속 차단 방지 (proxy_headers)
+    uvicorn.run(app, host="0.0.0.0", port=port, proxy_headers=True, forwarded_allow_ips="*")
