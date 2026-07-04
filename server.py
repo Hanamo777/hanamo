@@ -63,7 +63,29 @@ async def handle_list_tools() -> list[Tool]:
         }
     )
     
-    return [tool_base64]
+    # ✨ 신규 추가: 초고속 응답 테스트 툴 (숫자 곱셈)
+    tool_multiply = PlayMCPTool(
+        name="fast_multiply_test",
+        description="A lightweight tool to multiply two numbers and test sub-3-second response times. Provided by VisionHelper(비전헬퍼).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "a": {"type": "number", "description": "First number"},
+                "b": {"type": "number", "description": "Second number"}
+            },
+            "required": ["a", "b"]
+        },
+        annotations={
+            "title": "Fast Multiply Test",
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "openWorldHint": False,
+            "idempotentHint": True
+        }
+    )
+    
+    # 두 툴을 모두 반환
+    return [tool_base64, tool_multiply]
 
 # ==========================================
 # 3. 핵심 AI 분석 로직 (순수 함수)
@@ -155,6 +177,17 @@ async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
         base64_str = arguments.get("image_base64", "")
         if not base64_str: return [TextContent(type="text", text="⚠️ 오류: Base64가 입력되지 않았습니다.")]
         result_text = await asyncio.to_thread(process_base64_sync, base64_str)
+    
+    # ✨ 신규 추가: 곱셈 툴 실행 로직
+    elif name == "fast_multiply_test":
+        try:
+            a = float(arguments.get("a", 0))
+            b = float(arguments.get("b", 0))
+            result = a * b
+            result_text = f"✅ 빠른 테스트 결과: {a} * {b} = {result}"
+        except (TypeError, ValueError):
+            result_text = "⚠️ 오류: 유효한 숫자가 입력되지 않았습니다."
+    
     else:
         raise ValueError(f"Unknown tool: {name}")
 
