@@ -1,5 +1,4 @@
 import uvicorn
-import time
 import os
 import json
 from fastapi import FastAPI, Request
@@ -10,6 +9,7 @@ from mcp.types import Tool, TextContent
 from mcp.server.sse import SseServerTransport
 from starlette.routing import Route
 
+# Pydantic이 추가 필드(annotations)를 직렬화할 수 있도록 허용
 Tool.model_config = ConfigDict(extra="allow")
 
 class PlayMCPTool(Tool):
@@ -17,9 +17,9 @@ class PlayMCPTool(Tool):
 
 server = Server("mcp-vision-guide")
 
-# 1. 덧셈 툴만 단독 활성화 (가장 안전하고 빠른 테스트용)
 @server.list_tools()
 async def handle_list_tools() -> list[Tool]:
+    # ✨ 핵심: 불안정한 통신 조작 대신, 여기서 툴을 만들 때 바로 annotations를 주입합니다.
     tool_multiply = PlayMCPTool(
         name="fast_multiply_test",
         description="A lightweight tool to multiply two numbers. Provided by VisionHelper(비전헬퍼).",
@@ -30,6 +30,13 @@ async def handle_list_tools() -> list[Tool]:
                 "b": {"type": "number"}
             },
             "required": ["a", "b"]
+        },
+        annotations={
+            "title": "fast_multiply_test",
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "openWorldHint": False,
+            "idempotentHint": True
         }
     )
     return [tool_multiply]
@@ -46,7 +53,6 @@ async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
 
 app = FastAPI()
 
-# 프론트엔드 통신 허용 (CORS)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -64,52 +70,19 @@ def health_check():
 async def empty_asgi_app(scope, receive, send):
     pass
 
-# ✨ [핵심 방어] 프록시 관통 및 카카오 필수 규격 강제 주입 (통신 방해 없음, 줄바꿈 호환)
+# ✨ [최종 방어] 텍스트 파싱/버퍼링 같은 불안정한 조작은 싹 다 지우고, 프록시 버퍼링 차단만 남겼습니다.
 async def handle_sse(request: Request):
     original_send = request._send
-    
+
     async def intercepted_send(message: dict):
-        # 1. 클라우드 프록시 버퍼링 강제 차단 (연결 끊김 방지)
+        # 카카오 클라우드 프록시(Envoy/Nginx)의 연결 끊김을 막기 위한 필수 헤더
         if message["type"] == "http.response.start":
             headers = list(message.get("headers", []))
             headers.append((b"x-accel-buffering", b"no"))
+            headers.append((b"cache-control", b"no-cache"))
             message["headers"] = headers
-
-        # 2. 본문 전송 시 실시간 문자열 교체 (버퍼링 없이 즉시 통과)
-        if message.get("type") == "http.response.body" and b"tools" in message.get("body", b""):
-            try:
-                body_str = message["body"].decode("utf-8")
-                
-                # 안전한 파싱: \n\n 이든 \r\n\r\n 이든 상관없이 data: 부분만 정확히 추출
-                if "event: message" in body_str and "data: " in body_str:
-                    parts = body_str.split("data: ", 1)
-                    prefix = parts[0] + "data: "
-                    content = parts[1]
-                    
-                    # 뒤에 붙은 줄바꿈 문자들(\n, \r)을 보존하기 위해 분리
-                    json_str = content.rstrip()
-                    newlines = content[len(json_str):]
-                    
-                    data = json.loads(json_str)
-                    
-                    # ✨ 카카오 필수 규격(annotations) 복구 로직
-                    if "result" in data and "tools" in data.get("result", {}):
-                        for tool in data["result"]["tools"]:
-                            tool["annotations"] = {
-                                "title": tool.get("name", "Tool"),
-                                "readOnlyHint": True,
-                                "destructiveHint": False,
-                                "openWorldHint": False,
-                                "idempotentHint": True
-                            }
-                    
-                    new_json_str = json.dumps(data)
-                    # 원본 그대로 줄바꿈 문자까지 합쳐서 덮어쓰기
-                    message["body"] = f"{prefix}{new_json_str}{newlines}".encode("utf-8")
-            except Exception:
-                pass # 파싱 실패 시 서버 멈춤 없이 원본 그대로 전송
-                
-        # 변경된 메시지를 0.1초의 지연도 없이 즉시 클라이언트로 전송
+            
+        # 본문(Body)은 손대지 않고, Pydantic이 만든 순정 상태 그대로 즉시 전송
         await original_send(message)
 
     async with sse.connect_sse(request.scope, request.receive, intercepted_send) as streams:
