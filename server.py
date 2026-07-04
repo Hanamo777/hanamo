@@ -16,6 +16,7 @@ from mcp.server import Server
 from mcp.types import Tool, TextContent
 from mcp.server.sse import SseServerTransport
 from collections import Counter
+from starlette.routing import Route
 
 # [핵심 방어] 공식 MCP SDK가 카카오 전용 필드(annotations)를 삭제하지 못하도록 강제 허용
 Tool.model_config = ConfigDict(extra="allow")
@@ -184,17 +185,20 @@ sse = SseServerTransport("/mcp")
 def health_check():
     return {"status": "Active"}
 
-# ✨ 모든 종류의 GET 요청 흡수 (경로 잘림, 변형 방어)
-@app.get("/{path:path}")
-async def handle_sse(path: str, request: Request):
+# 🚨 기존에 있던 @app.get("/{path:path}") 와 @app.post("/{path:path}") 부분은 완전히 지워주세요.
+
+# ✨ FastAPI가 응답을 생성하지 못하도록 순수 비동기 함수로만 정의합니다.
+async def handle_sse(request: Request):
     async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
         await server.run(streams[0], streams[1], server.create_initialization_options())
 
-# ✨ 모든 종류의 POST 요청 흡수 (메시지 통신 경로 꼬임 방어)
-@app.post("/{path:path}")
-async def handle_post(path: str, request: Request):
+async def handle_post(request: Request):
     await sse.handle_post_message(request.scope, request.receive, request._send)
 
+# ✨ Starlette Route를 사용하여 "/mcp" 경로에 직접 연결합니다.
+app.routes.append(Route("/mcp", endpoint=handle_sse, methods=["GET"]))
+app.routes.append(Route("/mcp", endpoint=handle_post, methods=["POST"]))
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 3000))
     uvicorn.run(app, host="0.0.0.0", port=port)

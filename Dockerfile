@@ -18,7 +18,7 @@ RUN wget -q -O efficientdet_lite0.tflite https://storage.googleapis.com/mediapip
 COPY . .
 
 # 7. 클라우드 배포용 포트 환경변수 설정 및 노출 (PlayMCP 표준 대응)
-ENV PORT=8080
-EXPOSE 8080
+ENV PORT=3000
+EXPOSE 3000
 
 CMD ["python", "server.py"]
