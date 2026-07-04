@@ -64,43 +64,84 @@ def health_check():
 async def empty_asgi_app(scope, receive, send):
     pass
 
-# ✨ [핵심 방어] 프록시 관통 및 카카오 필수 규격 강제 주입
+# ✨ [핵심 방어] 프록시 관통 및 카카오 필수 규격 강제 주입 (Chunking 대응 완료)
 async def handle_sse(request: Request):
     original_send = request._send
-    
+    response_buffer = b""  # 쪼개진 패킷을 모아둘 버퍼
+
     async def intercepted_send(message: dict):
+        nonlocal response_buffer
+        
         # 1. 클라우드 프록시 버퍼링 강제 차단 (연결 실패 해결)
         if message["type"] == "http.response.start":
             headers = list(message.get("headers", []))
             headers.append((b"x-accel-buffering", b"no"))
             message["headers"] = headers
+            await original_send(message)
+            return
 
-        # 2. Pydantic이 지워버린 annotations 강제 복구 (툴 미노출 해결)
-        if message.get("type") == "http.response.body" and b"tools" in message.get("body", b""):
-            try:
-                body_str = message["body"].decode("utf-8")
-                if body_str.startswith("event: message\ndata: "):
-                    parts = body_str.split("data: ", 1)
-                    prefix = parts[0] + "data: "
-                    json_str, tail = parts[1].rsplit("\n\n", 1)
-                    
-                    data = json.loads(json_str)
-                    if "result" in data and "tools" in data["result"]:
-                        for tool in data["result"]["tools"]:
-                            tool["annotations"] = {
-                                "title": tool.get("name", "Tool"),
-                                "readOnlyHint": True,
-                                "destructiveHint": False,
-                                "openWorldHint": False,
-                                "idempotentHint": True
-                            }
-                    
-                    new_json_str = json.dumps(data)
-                    message["body"] = f"{prefix}{new_json_str}\n\n{tail}".encode("utf-8")
-            except Exception:
-                pass
+        # 2. 본문(Body) 전송 시 청크 조립 및 안전한 파싱
+        if message.get("type") == "http.response.body":
+            chunk = message.get("body", b"")
+            more_body = message.get("more_body", False)
+            
+            response_buffer += chunk
+            messages_to_send = []
+
+            # SSE 규격의 끝인 \n\n 이 버퍼에 완성될 때마다 잘라서 처리
+            while b"\n\n" in response_buffer:
+                part, response_buffer = response_buffer.split(b"\n\n", 1)
+                part_str = part.decode("utf-8", errors="ignore")
+
+                # 이벤트 메시지인 경우에만 파싱 시도
+                if part_str.startswith("event: message\ndata: "):
+                    try:
+                        prefix, json_str = part_str.split("data: ", 1)
+                        data = json.loads(json_str)
+                        
+                        # ✨ Pydantic이 지워버린 annotations 강제 복구
+                        if "result" in data and "tools" in data.get("result", {}):
+                            for tool in data["result"]["tools"]:
+                                tool["annotations"] = {
+                                    "title": tool.get("name", "Tool"),
+                                    "readOnlyHint": True,
+                                    "destructiveHint": False,
+                                    "openWorldHint": False,
+                                    "idempotentHint": True
+                                }
+                        
+                        # 다시 JSON으로 감싸기
+                        new_json_str = json.dumps(data)
+                        part = f"{prefix}data: {new_json_str}".encode("utf-8")
+                    except Exception as e:
+                        # 파싱 실패 시 원본 보존 (에러 무시)
+                        pass
                 
-        await original_send(message)
+                messages_to_send.append(part + b"\n\n")
+
+            # 원본 스트림이 끝났는데 버퍼에 남은 데이터가 있다면 밀어내기
+            if not more_body and response_buffer:
+                messages_to_send.append(response_buffer)
+                response_buffer = b""
+
+            # 가공 완료된 메시지들을 안전하게 클라이언트로 전송
+            for i, msg_body in enumerate(messages_to_send):
+                is_last_chunk = (i == len(messages_to_send) - 1)
+                await original_send({
+                    "type": "http.response.body",
+                    "body": msg_body,
+                    # 원본의 상태를 보존 (이 배치의 마지막일 때만 원본 more_body를 따름)
+                    "more_body": more_body if is_last_chunk else True
+                })
+
+            # 전송할 조립 메시지는 없지만 원본 통신 종료 시그널이 왔을 때
+            if not more_body and not messages_to_send:
+                await original_send({
+                    "type": "http.response.body",
+                    "body": b"",
+                    "more_body": False
+                })
+                return
 
     async with sse.connect_sse(request.scope, request.receive, intercepted_send) as streams:
         await server.run(streams[0], streams[1], server.create_initialization_options())
