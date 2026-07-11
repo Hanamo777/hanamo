@@ -2,16 +2,16 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import json
+import asyncio
 
-app = FastAPI(title="Kakao PlayMCP Simple Math Server")
+app = FastAPI(title="Simple Math Server")
 
-# 보안 요구사항: Origin 검증 (CORS 설정)
-# 실제 운영 시에는 playmcp.kakao.com 등 특정 도메인만 허용하는 것이 좋습니다.
+# 1. CORS 설정 수정 (allow_credentials=False 로 변경하여 충돌 방지)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # 대회 테스트를 위해 일단 모두 열어둡니다.
-    allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_origins=["*"], 
+    allow_credentials=False, # Stateless 서버이므로 False가 안전합니다.
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -154,8 +154,23 @@ async def mcp_post_endpoint(request: Request):
 
 @app.get("/mcp")
 async def mcp_get_endpoint():
-    """SSE 스트림을 제공하지 않음을 명시 (Stateless)"""
-    return Response(status_code=405, content="SSE Stream not supported. Use POST for stateless requests.")
+    """
+    PlayMCP 콘솔(클라이언트)이 연결 검증을 위해 SSE 스트림을 요구할 경우를 대비하여,
+    연결을 수락하고 POST 엔드포인트를 안내하는 표준 SSE 응답을 보냅니다.
+    """
+    async def event_generator():
+        # 클라이언트에게 이 서버의 엔드포인트 경로를 명시적으로 알려줌
+        yield "event: endpoint\ndata: /mcp\n\n"
+        try:
+            # 15초 주기로 빈 핑을 보내어 연결을 유지시킴 (PlayMCP 검증 봇 통과용)
+            while True:
+                await asyncio.sleep(15)
+                yield ": keepalive\n\n"
+        except asyncio.CancelledError:
+            # 클라이언트가 연결을 끊으면 자연스럽게 종료
+            pass
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 if __name__ == "__main__":
     import uvicorn
