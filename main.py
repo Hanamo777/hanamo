@@ -1,22 +1,26 @@
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse, StreamingResponse # StreamingResponse 추가
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import json
 import asyncio
+import uuid
 
 app = FastAPI(title="Simple Math Server")
 
-# 1. CORS 설정 (allow_credentials=False 로 변경하여 충돌 방지)
+# CORS 설정
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
-    allow_credentials=False, # Stateless 서버이므로 False가 안전합니다.
+    allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
 SERVICE_NAME = "Simple Math Calculator(심플 수학 계산기)"
 SUPPORTED_VERSIONS = ["2025-11-25", "2025-03-26"]
+
+# 세션 관리를 위한 전역 딕셔너리 (Session ID -> asyncio.Queue)
+active_sessions = {}
 
 def handle_initialize(req_id: str | int) -> dict:
     return {
@@ -52,11 +56,11 @@ def handle_tools_list(req_id: str | int) -> dict:
                         "required": ["a", "b"]
                     },
                     "annotations": {
-                        "title": "Addition Tool",
-                        "readOnlyHint": "safe",
-                        "destructiveHint": "safe",
-                        "openWorldHint": "closed",
-                        "idempotentHint": "idempotent"
+                        "title": "Addition Tool",  # 타이틀은 문자열 그대로 둡니다 (툴에 맞게 변경)
+                        "readOnlyHint": True,      # 데이터를 읽기만 하거나 상태 변경이 없으므로 True
+                        "destructiveHint": False,  # 데이터 삭제/수정 등 파괴적인 작업이 아니므로 False
+                        "openWorldHint": False,    # 외부 API/웹과 상호작용하는 오픈월드가 아니므로 False
+                        "idempotentHint": True     # 같은 입력에 항상 같은 결과가 보장되므로 True
                     }
                 },
                 {
@@ -71,14 +75,13 @@ def handle_tools_list(req_id: str | int) -> dict:
                         "required": ["a", "b"]
                     },
                     "annotations": {
-                        "title": "Multiplication Tool",
-                        "readOnlyHint": "safe",
-                        "destructiveHint": "safe",
-                        "openWorldHint": "closed",
-                        "idempotentHint": "idempotent"
+                        "title": "Addition Tool",  # 타이틀은 문자열 그대로 둡니다 (툴에 맞게 변경)
+                        "readOnlyHint": True,      # 데이터를 읽기만 하거나 상태 변경이 없으므로 True
+                        "destructiveHint": False,  # 데이터 삭제/수정 등 파괴적인 작업이 아니므로 False
+                        "openWorldHint": False,    # 외부 API/웹과 상호작용하는 오픈월드가 아니므로 False
+                        "idempotentHint": True     # 같은 입력에 항상 같은 결과가 보장되므로 True
                     }
                 },
-                # 권장 개수(3~10개) 충족을 위한 거듭제곱 툴 추가
                 {
                     "name": "calculate_power",
                     "description": f"Calculates the power of a number. (첫 번째 숫자를 두 번째 숫자만큼 거듭제곱합니다) Provided by {SERVICE_NAME}",
@@ -91,11 +94,11 @@ def handle_tools_list(req_id: str | int) -> dict:
                         "required": ["a", "b"]
                     },
                     "annotations": {
-                        "title": "Power Tool",
-                        "readOnlyHint": "safe",
-                        "destructiveHint": "safe",
-                        "openWorldHint": "closed",
-                        "idempotentHint": "idempotent"
+                        "title": "Addition Tool",  # 타이틀은 문자열 그대로 둡니다 (툴에 맞게 변경)
+                        "readOnlyHint": True,      # 데이터를 읽기만 하거나 상태 변경이 없으므로 True
+                        "destructiveHint": False,  # 데이터 삭제/수정 등 파괴적인 작업이 아니므로 False
+                        "openWorldHint": False,    # 외부 API/웹과 상호작용하는 오픈월드가 아니므로 False
+                        "idempotentHint": True     # 같은 입력에 항상 같은 결과가 보장되므로 True
                     }
                 }
             ]
@@ -116,7 +119,6 @@ def handle_tools_call(req_id: str | int, params: dict) -> dict:
             result_val = a * b
             text_content = f"### 곱셈 결과\n**{a}** × **{b}** = **{result_val}**"
         elif tool_name == "calculate_power":
-            # 거듭제곱 계산 로직 추가
             result_val = a ** b
             text_content = f"### 거듭제곱 결과\n**{a}**^**{b}** = **{result_val}**"
         else:
@@ -137,18 +139,39 @@ def handle_tools_call(req_id: str | int, params: dict) -> dict:
         }
     }
 
-@app.post("/mcp")
-async def mcp_post_endpoint(request: Request):
-    """PlayMCP 클라이언트 요청 처리 (단일 엔드포인트)"""
-    # 1. Protocol Version 헤더 검증
-    protocol_version = request.headers.get("MCP-Protocol-Version")
-    if not protocol_version:
-        protocol_version = "2025-03-26" # Fallback
-    
-    if protocol_version not in SUPPORTED_VERSIONS:
-        return JSONResponse({"error": "Unsupported MCP Protocol Version"}, status_code=400)
+@app.get("/mcp")
+async def mcp_get_endpoint(request: Request):
+    """MCP 클라이언트 연결 수락 및 SSE 스트림 반환"""
+    session_id = str(uuid.uuid4())
+    queue = asyncio.Queue()
+    active_sessions[session_id] = queue
 
-    # 2. 본문 파싱
+    async def event_generator():
+        # 클라이언트에게 메시지를 보낼 POST 엔드포인트를 세션 ID와 함께 알려줌
+        yield f"event: endpoint\ndata: /mcp?sessionId={session_id}\n\n"
+        
+        try:
+            while True:
+                try:
+                    # 15초 동안 큐에 데이터가 들어오길 대기
+                    message = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    # 데이터가 들어오면 클라이언트에게 JSON 형태로 전송
+                    yield f"event: message\ndata: {json.dumps(message)}\n\n"
+                except asyncio.TimeoutError:
+                    # 15초 동안 메시지가 없으면 연결 유지를 위해 keepalive 전송
+                    yield ": keepalive\n\n"
+        except asyncio.CancelledError:
+            # 클라이언트 연결 종료 시 세션 정리
+            if session_id in active_sessions:
+                del active_sessions[session_id]
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.post("/mcp")
+async def mcp_post_endpoint(request: Request, sessionId: str = None):
+    """클라이언트로부터의 JSON-RPC 요청 수신"""
+    
+    # 본문 파싱
     try:
         body = await request.json()
     except json.JSONDecodeError:
@@ -158,7 +181,7 @@ async def mcp_post_endpoint(request: Request):
     req_id = body.get("id")
     params = body.get("params", {})
 
-    # 3. 라우팅
+    # 라우팅 및 응답 데이터 생성
     if method == "initialize":
         response_data = handle_initialize(req_id)
     elif method == "tools/list":
@@ -174,27 +197,13 @@ async def mcp_post_endpoint(request: Request):
             "error": {"code": -32601, "message": f"Method '{method}' not found"}
         }
 
-    return JSONResponse(content=response_data, headers={"Content-Type": "application/json"})
-
-@app.get("/mcp")
-async def mcp_get_endpoint():
-    """
-    PlayMCP 콘솔(클라이언트)이 연결 검증을 위해 SSE 스트림을 요구할 경우를 대비하여,
-    연결을 수락하고 POST 엔드포인트를 안내하는 표준 SSE 응답을 보냅니다.
-    """
-    async def event_generator():
-        # 클라이언트에게 이 서버의 엔드포인트 경로를 명시적으로 알려줌
-        yield "event: endpoint\ndata: /mcp\n\n"
-        try:
-            # 15초 주기로 빈 핑을 보내어 연결을 유지시킴 (PlayMCP 검증 봇 통과용)
-            while True:
-                await asyncio.sleep(15)
-                yield ": keepalive\n\n"
-        except asyncio.CancelledError:
-            # 클라이언트가 연결을 끊으면 자연스럽게 종료
-            pass
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    # 세션 ID가 존재하고 유효한 경우 큐에 응답 데이터를 넣고 202 Accepted 반환
+    if sessionId and sessionId in active_sessions:
+        await active_sessions[sessionId].put(response_data)
+        return Response(status_code=202) # 타임아웃 방지의 핵심
+    else:
+        # SSE 연결 없이 단발성 POST 테스트를 하는 경우를 위한 Fallback
+        return JSONResponse(content=response_data)
 
 if __name__ == "__main__":
     import uvicorn
