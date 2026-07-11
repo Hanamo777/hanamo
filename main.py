@@ -8,11 +8,13 @@ import base64
 import numpy as np
 import cv2
 import mediapipe as mp
+import requests
+import re
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from collections import Counter
 
-app = FastAPI(title="Vision Guide & Math Server")
+app = FastAPI(title="Vision Guide Server")
 
 # CORS 설정
 app.add_middleware(
@@ -26,11 +28,10 @@ app.add_middleware(
 SERVICE_NAME = "VisionHelper(비전헬퍼)"
 SUPPORTED_VERSIONS = ["2025-11-25", "2025-03-26"]
 
-# 세션 관리용 딕셔너리
 active_sessions = {}
 
 # ==========================================
-# 1. AI 모델 초기화 (메모리 로드)
+# 1. AI 모델 초기화
 # ==========================================
 MODEL_PATH = "efficientdet_lite0.tflite"
 try:
@@ -41,7 +42,6 @@ try:
 except Exception as e:
     print(f"❌ 모델 로드 실패: {e}")
     detector = None
-
 
 # ==========================================
 # 2. 이미지 분석 코어 로직
@@ -108,20 +108,52 @@ def process_core_logic(img_cv2: np.ndarray) -> str:
 
     return result_text
 
-def process_base64_sync(image_base64: str) -> str:
-    try:
-        if "," in image_base64: image_base64 = image_base64.split(",")[1]
-        img_data = base64.b64decode(image_base64)
-        nparr = np.frombuffer(img_data, np.uint8)
-        img_cv2 = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if img_cv2 is None: return "⚠️ 오류: 손상된 Base64 데이터입니다."
-        return process_core_logic(img_cv2)
-    except Exception as e:
-        return f"⚠️ Base64 이미지 분석 실패: {str(e)}"
-
+# --- 추후 사용을 위한 Base64 로직 주석 처리 ---
+# def process_base64_sync(image_base64: str) -> str:
+#     try:
+#         if "," in image_base64: image_base64 = image_base64.split(",")[1]
+#         img_data = base64.b64decode(image_base64)
+#         nparr = np.frombuffer(img_data, np.uint8)
+#         img_cv2 = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+#         if img_cv2 is None: return "⚠️ 오류: 손상된 Base64 데이터입니다."
+#         return process_core_logic(img_cv2)
+#     except Exception as e:
+#         return f"⚠️ Base64 이미지 분석 실패: {str(e)}"
 
 # ==========================================
-# 3. MCP 핸들러 (기존 통신 로직 유지)
+# 2-1. URL 기반 이미지 다운로드 및 처리 로직
+# ==========================================
+def convert_gdrive_url(url: str) -> str:
+    """구글 드라이브 View 링크를 직접 다운로드 링크로 자동 변환"""
+    match = re.search(r'drive\.google\.com/file/d/([a-zA-Z0-9_-]+)', url)
+    if match:
+        file_id = match.group(1)
+        return f"https://drive.google.com/uc?export=download&id={file_id}"
+    return url
+
+def process_url_sync(image_url: str) -> str:
+    try:
+        # 구글 드라이브 링크 호환 처리
+        direct_url = convert_gdrive_url(image_url)
+        
+        # 일부 서버에서 봇을 차단하는 것을 막기 위해 User-Agent 헤더 추가
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        response = requests.get(direct_url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        # 바이트 데이터를 OpenCV 이미지로 디코딩
+        nparr = np.frombuffer(response.content, np.uint8)
+        img_cv2 = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if img_cv2 is None:
+            return "⚠️ 오류: URL에서 유효한 이미지를 읽을 수 없습니다. (접근 권한이 없거나 지원하지 않는 파일 형식일 수 있습니다.)"
+            
+        return process_core_logic(img_cv2)
+    except Exception as e:
+        return f"⚠️ 이미지 URL 다운로드 및 분석 실패: {str(e)}"
+
+# ==========================================
+# 3. MCP 핸들러
 # ==========================================
 def handle_initialize(req_id: str | int) -> dict:
     return {
@@ -141,40 +173,32 @@ def handle_tools_list(req_id: str | int) -> dict:
         "result": {
             "tools": [
                 {
-                    "name": "analyze_vision_base64_optimized",
-                    "description": f"Analyzes an optimized Base64 image for visually impaired real-time assistance. Provided by {SERVICE_NAME}.",
+                    "name": "analyze_vision_url",
+                    "description": f"Analyzes an image from a given public URL (including Google Drive links) for visually impaired real-time assistance. Provided by {SERVICE_NAME}.",
                     "inputSchema": {
                         "type": "object",
-                        "properties": {"image_base64": {"type": "string", "description": "Base64 encoded image string"}},
-                        "required": ["image_base64"]
+                        "properties": {"image_url": {"type": "string", "description": "Public URL of the image"}},
+                        "required": ["image_url"]
                     },
                     "annotations": {
-                        "title": "Vision Analysis Tool",
+                        "title": "Vision Analysis by URL",
                         "readOnlyHint": True,
                         "destructiveHint": False,
-                        "openWorldHint": False,
-                        "idempotentHint": True
-                    }
-                },
-                {
-                    "name": "fast_multiply_test",
-                    "description": f"A lightweight tool to multiply two numbers. Provided by {SERVICE_NAME}.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "a": {"type": "number", "description": "First number"},
-                            "b": {"type": "number", "description": "Second number"}
-                        },
-                        "required": ["a", "b"]
-                    },
-                    "annotations": {
-                        "title": "Fast Multiply Test",
-                        "readOnlyHint": True,
-                        "destructiveHint": False,
-                        "openWorldHint": False,
+                        "openWorldHint": True, # 외부 인터넷(URL)과 통신하므로 True로 변경
                         "idempotentHint": True
                     }
                 }
+                # --- 기존 툴들 주석 처리 ---
+                # {
+                #     "name": "analyze_vision_base64_optimized",
+                #     "description": f"Analyzes an optimized Base64 image... Provided by {SERVICE_NAME}.",
+                #     "inputSchema": { ... },
+                #     "annotations": { ... }
+                # },
+                # {
+                #     "name": "fast_multiply_test",
+                #     ...
+                # }
             ]
         }
     }
@@ -184,18 +208,18 @@ async def handle_tools_call(req_id: str | int, params: dict) -> dict:
     args = params.get("arguments", {})
 
     try:
-        if tool_name == "analyze_vision_base64_optimized":
-            base64_str = args.get("image_base64", "")
-            if not base64_str:
-                text_content = "⚠️ 오류: Base64 데이터가 입력되지 않았습니다."
+        if tool_name == "analyze_vision_url":
+            image_url = args.get("image_url", "")
+            if not image_url:
+                text_content = "⚠️ 오류: 이미지 URL이 입력되지 않았습니다."
             else:
-                # 무거운 이미지 분석 작업을 비동기 스레드 풀에서 실행 (서버 먹통 방지)
-                text_content = await asyncio.to_thread(process_base64_sync, base64_str)
+                text_content = await asyncio.to_thread(process_url_sync, image_url)
                 
-        elif tool_name == "fast_multiply_test":
-            a = float(args.get("a", 0))
-            b = float(args.get("b", 0))
-            text_content = f"✅ 빠른 테스트 결과: **{a}** × **{b}** = **{a * b}**"
+        # --- 기존 툴 실행 로직 주석 처리 ---
+        # elif tool_name == "analyze_vision_base64_optimized":
+        #     ...
+        # elif tool_name == "fast_multiply_test":
+        #     ...
             
         else:
             text_content = f"Error: 알 수 없는 툴 이름입니다. ({tool_name})"
@@ -211,7 +235,7 @@ async def handle_tools_call(req_id: str | int, params: dict) -> dict:
     }
 
 # ==========================================
-# 4. 엔드포인트 라우팅 (수동 SSE 방식)
+# 4. 엔드포인트 라우팅 (SSE 연결 로직 유지)
 # ==========================================
 @app.get("/mcp")
 async def mcp_get_endpoint(request: Request):
@@ -250,7 +274,7 @@ async def mcp_post_endpoint(request: Request, sessionId: str = None):
     elif method == "tools/list":
         response_data = handle_tools_list(req_id)
     elif method == "tools/call":
-        response_data = await handle_tools_call(req_id, params) # async 처리
+        response_data = await handle_tools_call(req_id, params)
     elif method == "notifications/initialized":
         return Response(status_code=202)
     else:
