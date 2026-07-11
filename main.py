@@ -1,12 +1,12 @@
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse # StreamingResponse 추가
 from fastapi.middleware.cors import CORSMiddleware
 import json
 import asyncio
 
 app = FastAPI(title="Simple Math Server")
 
-# 1. CORS 설정 수정 (allow_credentials=False 로 변경하여 충돌 방지)
+# 1. CORS 설정 (allow_credentials=False 로 변경하여 충돌 방지)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -77,6 +77,26 @@ def handle_tools_list(req_id: str | int) -> dict:
                         "openWorldHint": "closed",
                         "idempotentHint": "idempotent"
                     }
+                },
+                # 권장 개수(3~10개) 충족을 위한 거듭제곱 툴 추가
+                {
+                    "name": "calculate_power",
+                    "description": f"Calculates the power of a number. (첫 번째 숫자를 두 번째 숫자만큼 거듭제곱합니다) Provided by {SERVICE_NAME}",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "a": {"type": "number", "description": "Base number (밑)"},
+                            "b": {"type": "number", "description": "Exponent (지수)"}
+                        },
+                        "required": ["a", "b"]
+                    },
+                    "annotations": {
+                        "title": "Power Tool",
+                        "readOnlyHint": "safe",
+                        "destructiveHint": "safe",
+                        "openWorldHint": "closed",
+                        "idempotentHint": "idempotent"
+                    }
                 }
             ]
         }
@@ -95,6 +115,10 @@ def handle_tools_call(req_id: str | int, params: dict) -> dict:
         elif tool_name == "calculate_multiply":
             result_val = a * b
             text_content = f"### 곱셈 결과\n**{a}** × **{b}** = **{result_val}**"
+        elif tool_name == "calculate_power":
+            # 거듭제곱 계산 로직 추가
+            result_val = a ** b
+            text_content = f"### 거듭제곱 결과\n**{a}**^**{b}** = **{result_val}**"
         else:
             text_content = f"Error: 알 수 없는 툴 이름입니다. ({tool_name})"
     except Exception as e:
