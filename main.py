@@ -8,7 +8,8 @@ import base64
 import numpy as np
 import cv2
 import mediapipe as mp
-import requests
+# 기존: import requests
+import httpx
 import re
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
@@ -121,7 +122,7 @@ def process_core_logic(img_cv2: np.ndarray) -> str:
 #         return f"⚠️ Base64 이미지 분석 실패: {str(e)}"
 
 # ==========================================
-# 2-1. URL 기반 이미지 다운로드 및 처리 로직
+# 2-1. URL 기반 이미지 다운로드 및 처리 로직 (비동기 및 타임아웃 최적화)
 # ==========================================
 def convert_gdrive_url(url: str) -> str:
     """구글 드라이브 View 링크를 직접 다운로드 링크로 자동 변환"""
@@ -131,24 +132,30 @@ def convert_gdrive_url(url: str) -> str:
         return f"https://drive.google.com/uc?export=download&id={file_id}"
     return url
 
-def process_url_sync(image_url: str) -> str:
+async def process_url_async(image_url: str) -> str:
     try:
-        # 구글 드라이브 링크 호환 처리
         direct_url = convert_gdrive_url(image_url)
-        
-        # 일부 서버에서 봇을 차단하는 것을 막기 위해 User-Agent 헤더 추가
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        response = requests.get(direct_url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        # 바이트 데이터를 OpenCV 이미지로 디코딩
-        nparr = np.frombuffer(response.content, np.uint8)
-        img_cv2 = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
-        if img_cv2 is None:
-            return "⚠️ 오류: URL에서 유효한 이미지를 읽을 수 없습니다. (접근 권한이 없거나 지원하지 않는 파일 형식일 수 있습니다.)"
+
+        # 1. 비동기 HTTP 요청 (타임아웃 2.0초로 강력 제한)
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(direct_url, headers=headers)
+            response.raise_for_status()
+            image_bytes = response.content
+
+        # 2. CPU 바운드 작업(디코딩 및 AI 분석)만 스레드로 분리하여 서버 멈춤 방지
+        def decode_and_process(data: bytes) -> str:
+            nparr = np.frombuffer(data, np.uint8)
+            img_cv2 = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if img_cv2 is None:
+                return "⚠️ 오류: URL에서 유효한 이미지를 읽을 수 없습니다."
+            return process_core_logic(img_cv2)
             
-        return process_core_logic(img_cv2)
+        return await asyncio.to_thread(decode_and_process, image_bytes)
+
+    except httpx.TimeoutException:
+        # 타임아웃 발생 시 카카오 서버에서 뻗기 전에 우리가 먼저 안내 메시지 반환
+        return "⚠️ [시간 초과] 이미지 다운로드에 2초 이상 소요되어 분석이 취소되었습니다. 더 용량이 작은 이미지 URL을 제공해 주세요."
     except Exception as e:
         return f"⚠️ 이미지 URL 다운로드 및 분석 실패: {str(e)}"
 
@@ -213,7 +220,9 @@ async def handle_tools_call(req_id: str | int, params: dict) -> dict:
             if not image_url:
                 text_content = "⚠️ 오류: 이미지 URL이 입력되지 않았습니다."
             else:
-                text_content = await asyncio.to_thread(process_url_sync, image_url)
+                # 기존: text_content = await asyncio.to_thread(process_url_sync, image_url)
+                # 변경: 직접 await 호출
+                text_content = await process_url_async(image_url)
                 
         # --- 기존 툴 실행 로직 주석 처리 ---
         # elif tool_name == "analyze_vision_base64_optimized":
