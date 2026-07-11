@@ -108,6 +108,18 @@ def process_core_logic(img_cv2: np.ndarray) -> str:
 
     return result_text
 
+# --- 추후 사용을 위한 Base64 로직 주석 처리 ---
+# def process_base64_sync(image_base64: str) -> str:
+#     try:
+#         if "," in image_base64: image_base64 = image_base64.split(",")[1]
+#         img_data = base64.b64decode(image_base64)
+#         nparr = np.frombuffer(img_data, np.uint8)
+#         img_cv2 = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+#         if img_cv2 is None: return "⚠️ 오류: 손상된 Base64 데이터입니다."
+#         return process_core_logic(img_cv2)
+#     except Exception as e:
+#         return f"⚠️ Base64 이미지 분석 실패: {str(e)}"
+
 # ==========================================
 # 2-1. URL 기반 이미지 다운로드 및 처리 로직
 # ==========================================
@@ -121,16 +133,15 @@ def convert_gdrive_url(url: str) -> str:
 
 def process_url_sync(image_url: str) -> str:
     try:
+        # 구글 드라이브 링크 호환 처리
         direct_url = convert_gdrive_url(image_url)
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         
-        # 🚨 [카카오 대회 p99 3,000ms 필수 규정 방어 코드] 🚨
-        # 원본 코드의 timeout=10을 timeout=2.5로 변경했습니다.
-        # 외부 이미지 서버가 느리게 응답하더라도 2.5초 만에 강제로 연결을 끊어버립니다.
-        # 이를 통해 99%의 요청이 무조건 3초 이내에 처리되도록 보장하여 대회 심사 반려를 막습니다.
-        response = requests.get(direct_url, headers=headers, timeout=2.5)
+        # 일부 서버에서 봇을 차단하는 것을 막기 위해 User-Agent 헤더 추가
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        response = requests.get(direct_url, headers=headers, timeout=10)
         response.raise_for_status()
         
+        # 바이트 데이터를 OpenCV 이미지로 디코딩
         nparr = np.frombuffer(response.content, np.uint8)
         img_cv2 = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
@@ -138,10 +149,6 @@ def process_url_sync(image_url: str) -> str:
             return "⚠️ 오류: URL에서 유효한 이미지를 읽을 수 없습니다. (접근 권한이 없거나 지원하지 않는 파일 형식일 수 있습니다.)"
             
         return process_core_logic(img_cv2)
-        
-    except requests.exceptions.Timeout:
-        # 🚨 타임아웃 발생 시 LLM에게 에러를 빠르게 뱉어내어 응답 속도 기준을 통과합니다.
-        return "⚠️ 오류: 이미지 로딩 시간이 지연되었습니다. (다른 URL을 시도해주세요.)"
     except Exception as e:
         return f"⚠️ 이미지 URL 다운로드 및 분석 실패: {str(e)}"
 
@@ -177,10 +184,21 @@ def handle_tools_list(req_id: str | int) -> dict:
                         "title": "Vision Analysis by URL",
                         "readOnlyHint": True,
                         "destructiveHint": False,
-                        "openWorldHint": True,
+                        "openWorldHint": True, # 외부 인터넷(URL)과 통신하므로 True로 변경
                         "idempotentHint": True
                     }
                 }
+                # --- 기존 툴들 주석 처리 ---
+                # {
+                #     "name": "analyze_vision_base64_optimized",
+                #     "description": f"Analyzes an optimized Base64 image... Provided by {SERVICE_NAME}.",
+                #     "inputSchema": { ... },
+                #     "annotations": { ... }
+                # },
+                # {
+                #     "name": "fast_multiply_test",
+                #     ...
+                # }
             ]
         }
     }
@@ -196,6 +214,13 @@ async def handle_tools_call(req_id: str | int, params: dict) -> dict:
                 text_content = "⚠️ 오류: 이미지 URL이 입력되지 않았습니다."
             else:
                 text_content = await asyncio.to_thread(process_url_sync, image_url)
+                
+        # --- 기존 툴 실행 로직 주석 처리 ---
+        # elif tool_name == "analyze_vision_base64_optimized":
+        #     ...
+        # elif tool_name == "fast_multiply_test":
+        #     ...
+            
         else:
             text_content = f"Error: 알 수 없는 툴 이름입니다. ({tool_name})"
     except Exception as e:
@@ -210,7 +235,7 @@ async def handle_tools_call(req_id: str | int, params: dict) -> dict:
     }
 
 # ==========================================
-# 4. 엔드포인트 라우팅
+# 4. 엔드포인트 라우팅 (SSE 연결 로직 유지)
 # ==========================================
 @app.get("/mcp")
 async def mcp_get_endpoint(request: Request):

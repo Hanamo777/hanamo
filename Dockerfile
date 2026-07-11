@@ -4,9 +4,9 @@ FROM python:3.10-slim
 # 작업 디렉토리 설정
 WORKDIR /app
 
-# 시스템 의존성 (headless 버전을 쓰므로 libgl1 등은 불필요, 모델 다운로드용 wget만 설치)
+# 시스템 의존성(OpenCV 구동용) 및 wget 설치
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget \
+    wget libglib2.0-0 libgl1 libxcb1 libgles2 libegl1 \
     && rm -rf /var/lib/apt/lists/*
 
 # 요구사항 파일 복사 및 설치
