@@ -4,4 +4,4 @@ pydantic==2.6.4
 opencv-python-headless==4.9.0.80
 mediapipe==0.10.11
 numpy==1.26.4
-httpx
+requests==2.31.0 

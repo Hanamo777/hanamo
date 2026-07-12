@@ -4,10 +4,11 @@ from fastapi.middleware.cors import CORSMiddleware
 import json
 import asyncio
 import uuid
+import base64
 import numpy as np
 import cv2
 import mediapipe as mp
-import httpx
+import requests
 import re
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
@@ -24,7 +25,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SERVICE_NAME = "VisionHelper(비전헬퍼)"
+SERVICE_NAME = "HelpTheBlind(헬프더블라인드)"
 SUPPORTED_VERSIONS = ["2025-11-25", "2025-03-26"]
 
 active_sessions = {}
@@ -43,9 +44,9 @@ except Exception as e:
     detector = None
 
 # ==========================================
-# 2. 이미지 분석 코어 로직 (모드별 분기 추가)
+# 2. 이미지 분석 코어 로직
 # ==========================================
-def process_core_logic(img_cv2: np.ndarray, mode: str = "full") -> str:
+def process_core_logic(img_cv2: np.ndarray) -> str:
     if detector is None:
         return "⚠️ **오류**: AI 시각 모델이 로드되지 않았습니다."
 
@@ -96,16 +97,6 @@ def process_core_logic(img_cv2: np.ndarray, mode: str = "full") -> str:
     counts = Counter(detected_names)
     counts_str = ", ".join([f"{item} {count}개" for item, count in counts.items()])
 
-    # --- 요청된 모드(mode)에 따라 반환 텍스트 변경 ---
-    if mode == "danger":
-        if collision_warnings:
-            return f"🚨 [긴급 충돌 경고]\n" + "\n".join(collision_warnings)
-        return "✅ [안전 상태] 현재 초근접 위험 장애물이 감지되지 않았습니다."
-        
-    elif mode == "count":
-        return f"📊 [객체 카운트 결과]\n총합: {counts_str}"
-
-    # 기본(full) 보고서
     result_text = f"### 👁️ {SERVICE_NAME} 시각보조 분석 보고서\n\n"
     if collision_warnings:
         result_text += f"#### 🚨 긴급 충돌 경고\n" + "\n".join(collision_warnings) + "\n\n"
@@ -114,50 +105,55 @@ def process_core_logic(img_cv2: np.ndarray, mode: str = "full") -> str:
 
     result_text += f"#### 📊 탐지 결과 요약\n- **총합**: {counts_str}\n\n"
     result_text += "#### 🧭 세부 방향 위치\n" + "\n".join(directional_guidance)
+
     return result_text
 
+# --- 추후 사용을 위한 Base64 로직 주석 처리 ---
+# def process_base64_sync(image_base64: str) -> str:
+#     try:
+#         if "," in image_base64: image_base64 = image_base64.split(",")[1]
+#         img_data = base64.b64decode(image_base64)
+#         nparr = np.frombuffer(img_data, np.uint8)
+#         img_cv2 = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+#         if img_cv2 is None: return "⚠️ 오류: 손상된 Base64 데이터입니다."
+#         return process_core_logic(img_cv2)
+#     except Exception as e:
+#         return f"⚠️ Base64 이미지 분석 실패: {str(e)}"
+
 # ==========================================
-# 2-1. URL 기반 이미지 처리 로직
+# 2-1. URL 기반 이미지 다운로드 및 처리 로직
 # ==========================================
 def convert_gdrive_url(url: str) -> str:
+    """구글 드라이브 View 링크를 직접 다운로드 링크로 자동 변환"""
     match = re.search(r'drive\.google\.com/file/d/([a-zA-Z0-9_-]+)', url)
     if match:
         file_id = match.group(1)
         return f"https://drive.google.com/uc?export=download&id={file_id}"
     return url
 
-async def process_url_async(image_url: str, mode: str = "full") -> str:
+def process_url_sync(image_url: str) -> str:
     try:
+        # 구글 드라이브 링크 호환 처리
         direct_url = convert_gdrive_url(image_url)
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
-        }
-
-        # 🚀 중요: follow_redirects=True 로 구글 드라이브 리다이렉트 허용, 타임아웃 2.5초
-        async with httpx.AsyncClient(timeout=2.5, follow_redirects=True) as client:
-            response = await client.get(direct_url, headers=headers)
-            response.raise_for_status()
-            image_bytes = response.content
-
-        def decode_and_process(data: bytes) -> str:
-            nparr = np.frombuffer(data, np.uint8)
-            img_cv2 = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            if img_cv2 is None:
-                return "⚠️ 오류: 다운로드된 데이터가 유효한 이미지가 아닙니다."
-            return process_core_logic(img_cv2, mode=mode)
+        
+        # 일부 서버에서 봇을 차단하는 것을 막기 위해 User-Agent 헤더 추가
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        response = requests.get(direct_url, headers=headers, timeout=2.5)
+        response.raise_for_status()
+        
+        # 바이트 데이터를 OpenCV 이미지로 디코딩
+        nparr = np.frombuffer(response.content, np.uint8)
+        img_cv2 = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if img_cv2 is None:
+            return "⚠️ 오류: URL에서 유효한 이미지를 읽을 수 없습니다. (접근 권한이 없거나 지원하지 않는 파일 형식일 수 있습니다.)"
             
-        return await asyncio.to_thread(decode_and_process, image_bytes)
-
-    except httpx.TimeoutException:
-        return "⚠️ [시간 초과] 이미지 다운로드에 2.5초 이상 소요되어 분석이 취소되었습니다."
-    except httpx.RequestError as e:
-        return f"⚠️ 네트워크 통신 오류로 이미지를 가져올 수 없습니다. ({str(e)})"
+        return process_core_logic(img_cv2)
     except Exception as e:
-        return f"⚠️ 이미지 분석 실패: {str(e)}"
+        return f"⚠️ 이미지 URL 다운로드 및 분석 실패: {str(e)}"
 
 # ==========================================
-# 3. MCP 핸들러 (툴 3개로 확장)
+# 3. MCP 핸들러
 # ==========================================
 def handle_initialize(req_id: str | int) -> dict:
     return {
@@ -171,48 +167,38 @@ def handle_initialize(req_id: str | int) -> dict:
     }
 
 def handle_tools_list(req_id: str | int) -> dict:
-    common_annotations = {
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "openWorldHint": True,
-        "idempotentHint": True
-    }
-    
     return {
         "jsonrpc": "2.0",
         "id": req_id,
         "result": {
             "tools": [
                 {
-                    "name": "analyze_vision_full",
-                    "description": f"Provides a comprehensive visual analysis report including object detection, directions, and safety warnings from an image URL. Provided by {SERVICE_NAME}.",
+                    "name": "analyze_vision_url",
+                    "description": f"Analyzes an image from a given public URL (including Google Drive links) for visually impaired real-time assistance. Provided by {SERVICE_NAME}.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {"image_url": {"type": "string", "description": "Public URL of the image"}},
                         "required": ["image_url"]
                     },
-                    "annotations": {"title": "Full Vision Analysis", **common_annotations}
-                },
-                {
-                    "name": "check_forward_danger",
-                    "description": f"Checks the image URL specifically for urgent collision hazards or extremely close obstacles in front of the user. Provided by {SERVICE_NAME}.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {"image_url": {"type": "string", "description": "Public URL of the image"}},
-                        "required": ["image_url"]
-                    },
-                    "annotations": {"title": "Collision Danger Check", **common_annotations}
-                },
-                {
-                    "name": "count_surrounding_objects",
-                    "description": f"Counts the number and types of objects present in the image URL to quickly grasp the surroundings. Provided by {SERVICE_NAME}.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {"image_url": {"type": "string", "description": "Public URL of the image"}},
-                        "required": ["image_url"]
-                    },
-                    "annotations": {"title": "Object Counter", **common_annotations}
+                    "annotations": {
+                        "title": "Vision Analysis by URL",
+                        "readOnlyHint": True,
+                        "destructiveHint": False,
+                        "openWorldHint": True, # 외부 인터넷(URL)과 통신하므로 True로 변경
+                        "idempotentHint": True
+                    }
                 }
+                # --- 기존 툴들 주석 처리 ---
+                # {
+                #     "name": "analyze_vision_base64_optimized",
+                #     "description": f"Analyzes an optimized Base64 image... Provided by {SERVICE_NAME}.",
+                #     "inputSchema": { ... },
+                #     "annotations": { ... }
+                # },
+                # {
+                #     "name": "fast_multiply_test",
+                #     ...
+                # }
             ]
         }
     }
@@ -220,22 +206,25 @@ def handle_tools_list(req_id: str | int) -> dict:
 async def handle_tools_call(req_id: str | int, params: dict) -> dict:
     tool_name = params.get("name")
     args = params.get("arguments", {})
-    image_url = args.get("image_url", "")
 
-    if not image_url:
-        text_content = "⚠️ 오류: 이미지 URL이 입력되지 않았습니다."
-    else:
-        try:
-            if tool_name == "analyze_vision_full":
-                text_content = await process_url_async(image_url, mode="full")
-            elif tool_name == "check_forward_danger":
-                text_content = await process_url_async(image_url, mode="danger")
-            elif tool_name == "count_surrounding_objects":
-                text_content = await process_url_async(image_url, mode="count")
+    try:
+        if tool_name == "analyze_vision_url":
+            image_url = args.get("image_url", "")
+            if not image_url:
+                text_content = "⚠️ 오류: 이미지 URL이 입력되지 않았습니다."
             else:
-                text_content = f"Error: 알 수 없는 툴 이름입니다. ({tool_name})"
-        except Exception as e:
-            text_content = f"Error: 처리 중 오류가 발생했습니다. ({str(e)})"
+                text_content = await asyncio.to_thread(process_url_sync, image_url)
+                
+        # --- 기존 툴 실행 로직 주석 처리 ---
+        # elif tool_name == "analyze_vision_base64_optimized":
+        #     ...
+        # elif tool_name == "fast_multiply_test":
+        #     ...
+            
+        else:
+            text_content = f"Error: 알 수 없는 툴 이름입니다. ({tool_name})"
+    except Exception as e:
+        text_content = f"Error: 처리 중 오류가 발생했습니다. ({str(e)})"
 
     return {
         "jsonrpc": "2.0",
@@ -246,7 +235,7 @@ async def handle_tools_call(req_id: str | int, params: dict) -> dict:
     }
 
 # ==========================================
-# 4. 엔드포인트 라우팅 (SSE)
+# 4. 엔드포인트 라우팅 (SSE 연결 로직 유지)
 # ==========================================
 @app.get("/mcp")
 async def mcp_get_endpoint(request: Request):
